@@ -23,6 +23,8 @@
  * SOFTWARE.
  */
 
+
+
 use std::process;
 use std::fs::File;
 use std::io::{prelude::*,BufReader};
@@ -33,6 +35,7 @@ use msite::MSite;
 use statrs::distribution::Normal;
 use statrs::distribution::ContinuousCDF;
 
+
 // ADS: (TODO) test this!
 fn wilson_ci_for_binomial(
     alpha: f64,
@@ -42,17 +45,20 @@ fn wilson_ci_for_binomial(
     upper: &mut f64,
 ) {
     let g = Normal::new(0.0, 1.0).unwrap();
+    let z: f64 = g.inverse_cdf(1.0 - alpha/2.0);
+
     let n = n as f64;
-    let z: f64 = g.cdf(1.0 - alpha/2.0);
     let zz = z*z;
     let denom: f64 = 1.0 + zz/n;
-    let first_term: f64 = p_hat + zz/(2.0*n);
+    let first_term: f64 = (p_hat + zz/(2.0*n))/denom;
     let discriminant: f64 = p_hat*(1.0 - p_hat)/n + zz/(4.0*n*n);
-    *lower = first_term - z*discriminant.sqrt()/denom;
+    let second_term: f64 = z*discriminant.sqrt()/denom;
+
+    *lower = first_term - second_term;
     if *lower < 0.0 {
         *lower = 0.0;
     }
-    *upper = first_term + z*discriminant.sqrt()/denom;
+    *upper = first_term + second_term;
     if *upper > 1.0 {
         *upper = 1.0;
     }
@@ -62,14 +68,24 @@ fn wilson_ci_for_binomial(
 pub struct LevelsCounter {
     pub total_sites: u64,
     pub sites_covered: u64,
-    pub max_depth: u64,
-    pub mutations: u64,
     pub total_c: u64,
     pub total_t: u64,
+    pub max_depth: u64,
+    pub mutations: u64,
     pub called_meth: u64,
     pub called_unmeth: u64,
     pub mean_agg: f64,
+
+    // derived values
+    pub coverage: u64,
+    pub sites_covered_fraction: f64,
+    pub mean_depth: f64,
+    pub mean_depth_covered: f64,
+    pub mean_meth: f64,
+    pub mean_meth_weighted: f64,
+    pub fractional_meth: f64,
 }
+
 
 
 impl LevelsCounter {
@@ -98,24 +114,50 @@ impl LevelsCounter {
         }
         self.total_sites += 1;
     }
-    pub fn coverage(&self) -> u64 {
+    pub fn get_coverage(&self) -> u64 {
         self.total_c + self.total_t
     }
-    pub fn total_called(&self) -> u64 {
+    pub fn get_total_called(&self) -> u64 {
         self.called_meth + self.called_unmeth
     }
-    pub fn mean_meth_weighted(&self) -> f64 {
-        (self.total_c as f64)/(self.coverage() as f64)
+    pub fn get_mean_meth_weighted(&self) -> f64 {
+        (self.total_c as f64)/(self.get_coverage() as f64)
     }
-    pub fn fractional_meth(&self) -> f64 {
-        (self.called_meth as f64)/(self.total_called() as f64)
+    pub fn get_fractional_meth(&self) -> f64 {
+        (self.called_meth as f64)/(self.get_total_called() as f64)
     }
-    pub fn mean_meth(&self) -> f64 {
+    pub fn get_mean_meth(&self) -> f64 {
         self.mean_agg/(self.sites_covered as f64)
     }
 
     const ALPHA: f64 = 0.05;
+
+    pub fn set_derived_values(&mut self) {
+        self.coverage = self.get_coverage();
+        self.sites_covered_fraction =
+            (self.sites_covered as f64)/(self.total_sites as f64);
+        self.mean_depth = (self.coverage as f64)/(self.total_sites as f64);
+        self.mean_depth_covered =
+            (self.coverage as f64)/(self.sites_covered as f64);
+
+        if self.sites_covered != 0 {
+            self.mean_meth = self.get_mean_meth();
+            self.mean_meth_weighted = self.get_mean_meth_weighted();
+        }
+        else {
+            self.mean_meth = 0.0;
+            self.mean_meth_weighted = 0.0;
+        }
+
+        if self.get_total_called() > 0 {
+            self.fractional_meth = self.get_fractional_meth();
+        }
+        else {
+            self.fractional_meth = 0.0;
+        }
+    }
 }
+
 
 impl std::fmt::Display for LevelsCounter {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -177,7 +219,9 @@ pub fn run_mlevels(
                       std::str::from_utf8(&site.chrom).unwrap());
         }
 
+        // do this first, because the "add" for CpG can invalidate it
         lc.cytosine.update(&site);
+
         if site.is_cpg() {
             lc.cpg.update(&site);
             if prev_is_cpg && prev_site.is_mate_of(&site) {
@@ -205,6 +249,13 @@ pub fn run_mlevels(
 
         prev_site = site;
     }
+
+    lc.cytosine.set_derived_values();
+    lc.cpg.set_derived_values();
+    lc.cpg_symmetric.set_derived_values();
+    lc.chh.set_derived_values();
+    lc.ccg.set_derived_values();
+    lc.cxg.set_derived_values();
 
     write!(out, "{}", serde_yaml::to_string(&lc).unwrap()).unwrap();
 }
